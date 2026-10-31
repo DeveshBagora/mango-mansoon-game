@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mango Monsoon</title>
+<style>
+  body{margin:0;background:#0f2a2a;display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:Georgia,serif}
+  canvas{background:#123;max-width:100%;border:4px solid #f2b134;border-radius:6px;touch-action:none}
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="560"></canvas>
+<script>
+/* ============ CUSTOMIZATION (edit this block for your assigned twist) ============ */
+const CONFIG = {
+  title: "Mango Monsoon",
+  playerEmoji: "🧺",          // the player's character
+  goodEmoji: "🥭",            // collectible
+  badEmoji: "🪨",             // hazard
+  specialEmoji: "⭐",         // special object
+  goodPoints: 10,
+  badPenalty: 15,             // points lost on hazard
+  startLives: 3,
+  comboEvery: 5,              // every N good catches in a row -> bonus
+  comboBonus: 25,
+  specialEffect: "slowmo",    // "slowmo" | "extralife" | "doublepoints"
+  specialDuration: 5,         // seconds (for slowmo / doublepoints)
+  levelEvery: 50,             // score needed per level
+  speedPerLevel: 0.15,        // +15% fall speed each level
+  extraHazardPerLevel: 0.04,  // hazard probability grows each level
+  bgTop: "#1b4b5a", bgBottom: "#0f2a2a"
+};
+/* ================================================================================== */
+
+const cv = document.getElementById("game"), ctx = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+let state = "start";           // start | playing | paused | gameover
+let player, items, score, lives, level, combo, effectTimer, spawnTimer, best = 0, rain = [], floaters = [];
+const keys = {};
+
+/* ---------- Sound (generated with Web Audio, no files needed) ---------- */
+let actx;
+function beep(freq, dur, type = "sine", vol = 0.15) {
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.value = freq; g.gain.value = vol;
+    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
+    o.connect(g); g.connect(actx.destination); o.start(); o.stop(actx.currentTime + dur);
+  } catch (e) {}
+}
+const sfx = {
+  good: () => { beep(660, .12); setTimeout(() => beep(880, .12), 80); },
+  bad: () => beep(120, .35, "sawtooth", .2),
+  special: () => [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => beep(f, .15, "triangle"), i * 70)),
+  over: () => [400, 300, 200, 120].forEach((f, i) => setTimeout(() => beep(f, .25, "square", .12), i * 150))
+};
+
+/* ---------- Game setup ---------- */
+function resetGame() {
+  player = { x: W / 2 - 40, y: H - 70, w: 80, h: 50, speed: 7 };
+  items = []; floaters = [];
+  score = 0; lives = CONFIG.startLives; level = 1; combo = 0;
+  effectTimer = 0; spawnTimer = 0;
+  rain = Array.from({ length: 70 }, () => ({ x: Math.random() * W, y: Math.random() * H, s: 2 + Math.random() * 3 }));
+}
+function startGame() { resetGame(); state = "playing"; }
+
+/* ---------- Spawning & difficulty ---------- */
+function fallSpeed() {
+  let s = (2.2 + Math.random() * 1.5) * (1 + (level - 1) * CONFIG.speedPerLevel);
+  return effectTimer > 0 && CONFIG.specialEffect === "slowmo" ? s * 0.4 : s;
+}
+function spawn() {
+  const r = Math.random();
+  const badChance = Math.min(0.55, 0.25 + (level - 1) * CONFIG.extraHazardPerLevel);
+  let type = r < 0.07 ? "special" : r < 0.07 + badChance ? "bad" : "good";
+  items.push({ type, x: 30 + Math.random() * (W - 60), y: -30, r: 20, vy: fallSpeed(), wob: Math.random() * 6 });
+}
+
+/* ---------- Collision: circle (item) vs rectangle (player basket) ---------- */
+function hits(it, p) {
+  const nx = Math.max(p.x, Math.min(it.x, p.x + p.w));   // closest point on rect to circle centre
+  const ny = Math.max(p.y, Math.min(it.y, p.y + p.h));
+  const dx = it.x - nx, dy = it.y - ny;
+  return dx * dx + dy * dy < it.r * it.r;
+}
+function pop(text, x, y, color) { floaters.push({ text, x, y, color, life: 40 }); }
+
+/* ---------- Update ---------- */
+function update(dt) {
+  rain.forEach(d => { d.y += d.s * 3; if (d.y > H) { d.y = -10; d.x = Math.random() * W; } });
+  floaters.forEach(f => { f.y -= 1; f.life--; }); floaters = floaters.filter(f => f.life > 0);
+  if (state !== "playing") return;
+
+  if (keys["ArrowLeft"] || keys["a"]) player.x -= player.speed;
+  if (keys["ArrowRight"] || keys["d"]) player.x += player.speed;
+  player.x = Math.max(0, Math.min(W - player.w, player.x));
+
+  if (effectTimer > 0) effectTimer -= dt;
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) { spawn(); spawnTimer = Math.max(0.35, 0.95 - level * 0.07); }
+
+  for (const it of items) { it.y += it.vy; it.wob += 0.1; }
+  const mult = effectTimer > 0 && CONFIG.specialEffect === "doublepoints" ? 2 : 1;
+
+  items = items.filter(it => {
+    if (hits(it, player)) {
+      if (it.type === "good") {
+        score += CONFIG.goodPoints * mult; combo++; sfx.good();
+        pop("+" + CONFIG.goodPoints * mult, it.x, it.y, "#9be564");
+        if (combo % CONFIG.comboEvery === 0) { score += CONFIG.comboBonus; pop("COMBO +" + CONFIG.comboBonus, it.x, it.y - 25, "#ffd84d"); }
+      } else if (it.type === "bad") {
+        score = Math.max(0, score - CONFIG.badPenalty); lives--; combo = 0; sfx.bad();
+        pop("-" + CONFIG.badPenalty, it.x, it.y, "#ff6b6b");
+      } else {
+        sfx.special();
+        if (CONFIG.specialEffect === "extralife") { lives++; pop("+1 LIFE", it.x, it.y, "#ffd84d"); }
+        else { effectTimer = CONFIG.specialDuration; pop(CONFIG.specialEffect === "slowmo" ? "SLOW-MO!" : "2x POINTS!", it.x, it.y, "#ffd84d"); }
+      }
+      return false;
+    }
+    if (it.y > H + 30) {                       // missed a good item = lose combo
+      if (it.type === "good") combo = 0;
+      return false;
+    }
+    return true;
+  });
+
+  level = 1 + Math.floor(score / CONFIG.levelEvery);
+  if (lives <= 0) { state = "gameover"; best = Math.max(best, score); sfx.over(); }
+}
+
+/* ---------- Drawing ---------- */
+function emoji(ch, x, y, size) {
+  ctx.font = size + "px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(ch, x, y);
+}
+function text(t, x, y, size, color = "#fff", align = "center") {
+  ctx.fillStyle = color; ctx.font = "bold " + size + "px Georgia, serif";
+  ctx.textAlign = align; ctx.textBaseline = "alphabetic"; ctx.fillText(t, x, y);
+}
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, CONFIG.bgTop); g.addColorStop(1, CONFIG.bgBottom);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = "rgba(180,220,255,.25)"; ctx.lineWidth = 1.5;
+  rain.forEach(d => { ctx.beginPath(); ctx.moveTo(d.x, d.y); ctx.lineTo(d.x - 3, d.y + 12); ctx.stroke(); });
+  ctx.fillStyle = "#2c1c10"; ctx.fillRect(0, H - 14, W, 14);       // ground
+}
+function drawHUD() {
+  ctx.fillStyle = "rgba(0,0,0,.35)"; ctx.fillRect(0, 0, W, 44);
+  text("Score " + score, 16, 30, 22, "#fff", "left");
+  text("Level " + level, W / 2, 30, 22, "#ffd84d");
+  text("Lives " + "❤️".repeat(Math.max(0, lives)), W - 16, 30, 20, "#fff", "right");
+  if (effectTimer > 0) text("⭐ " + (CONFIG.specialEffect === "slowmo" ? "Slow-mo " : "Double points ") + effectTimer.toFixed(1) + "s", W / 2, 70, 18, "#ffd84d");
+  if (combo >= 2) text("Streak x" + combo, 16, 60, 16, "#9be564", "left");
+}
+function draw() {
+  drawBackground();
+  if (state === "start") {
+    text(CONFIG.title, W / 2, 130, 56, "#ffd84d");
+    emoji(CONFIG.playerEmoji, W / 2, 200, 64);
+    text(`Catch ${CONFIG.goodEmoji}  +${CONFIG.goodPoints}      Avoid ${CONFIG.badEmoji}  -${CONFIG.badPenalty} & a life`, W / 2, 270, 22);
+    text(`${CONFIG.specialEmoji} special: ${CONFIG.specialEffect}   |   ${CONFIG.comboEvery}-streak = +${CONFIG.comboBonus} bonus`, W / 2, 305, 18, "#cfe");
+    text("Move: ← → or A D (or drag mouse / finger)    Pause: P", W / 2, 350, 18, "#cfe");
+    text("Speed and hazards increase every " + CONFIG.levelEvery + " points", W / 2, 378, 18, "#cfe");
+    text("Press ENTER or click to start", W / 2, 450, 28, "#fff");
+    if (best) text("Best: " + best, W / 2, 490, 20, "#ffd84d");
+    return;
+  }
+  items.forEach(it => {
+    const e = it.type === "good" ? CONFIG.goodEmoji : it.type === "bad" ? CONFIG.badEmoji : CONFIG.specialEmoji;
+    emoji(e, it.x + Math.sin(it.wob) * 3, it.y, 40);
+  });
+  emoji(CONFIG.playerEmoji, player.x + player.w / 2, player.y + player.h / 2, 64);
+  floaters.forEach(f => { ctx.globalAlpha = f.life / 40; text(f.text, f.x, f.y, 20, f.color); ctx.globalAlpha = 1; });
+  drawHUD();
+  if (state === "paused") {
+    ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, W, H);
+    text("Paused", W / 2, H / 2, 48); text("Press P to resume", W / 2, H / 2 + 40, 20, "#cfe");
+  }
+  if (state === "gameover") {
+    ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, 0, W, H);
+    text("Game Over", W / 2, 200, 56, "#ff6b6b");
+    text("Score: " + score + "    Level: " + level, W / 2, 260, 28);
+    text("Best: " + best, W / 2, 300, 22, "#ffd84d");
+    text("Press ENTER or click to play again", W / 2, 380, 24);
+  }
+}
+
+/* ---------- Input ---------- */
+addEventListener("keydown", e => {
+  keys[e.key] = true;
+  if (e.key === "Enter" && (state === "start" || state === "gameover")) startGame();
+  if ((e.key === "p" || e.key === "P") && (state === "playing" || state === "paused")) state = state === "playing" ? "paused" : "playing";
+  if (e.key.startsWith("Arrow")) e.preventDefault();
+});
+addEventListener("keyup", e => keys[e.key] = false);
+function pointerX(e) {
+  const r = cv.getBoundingClientRect(), t = e.touches ? e.touches[0] : e;
+  return (t.clientX - r.left) * (W / r.width);
+}
+cv.addEventListener("mousemove", e => { if (state === "playing") player.x = Math.max(0, Math.min(W - player.w, pointerX(e) - player.w / 2)); });
+cv.addEventListener("touchmove", e => { if (state === "playing") player.x = Math.max(0, Math.min(W - player.w, pointerX(e) - player.w / 2)); }, { passive: true });
+cv.addEventListener("click", () => { if (state === "start" || state === "gameover") startGame(); });
+
+/* ---------- Main loop ---------- */
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+resetGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
